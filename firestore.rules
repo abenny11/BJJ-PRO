@@ -1,0 +1,143 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: coaches
+    // Document ID: {coachId} (User UID)
+    // Fields:
+    //   - uid: string (required) - Firebase Auth UID
+    //   - email: string (required) - Coach email
+    //   - name: string (required) - Coach name
+    //   - createdAt: string (required) - ISO 8601 date string
+    //
+    // Collection: athletes
+    // Document ID: {athleteId} (Access Code)
+    // Fields:
+    //   - coachId: string (required) - UID of the coach
+    //   - athleteUid: string (optional) - Anonymous UID of the athlete
+    //   - name: string (required) - Athlete name
+    //   - accessCode: string (required) - Access code (same as doc ID)
+    //   - createdAt: string (required) - ISO 8601 date string
+    //   - userData: string (required) - JSON serialized string of the athlete's data
+    //
+    // Collection: exercises
+    // Document ID: {exerciseId}
+    // Fields:
+    //   - id: string (required)
+    //   - name: string (required)
+    //   - category: string (required) - "Upper Push", "Upper Pull", "Lower Body"
+    //   - type: string (required) - "FIXO", "VARIAVEL"
+    //   - videoUrl: string (optional)
+    //   - coachId: string (required)
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isValidDateString(dateStr) {
+      return dateStr is string &&
+        dateStr.matches("^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}.*Z?$");
+    }
+
+    function isValidEmail(email) {
+      return email is string &&
+        email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+    }
+
+    function isValidCoach(data) {
+      return data.keys().hasAll(['uid', 'email', 'name', 'createdAt']) &&
+             data.uid is string && data.uid.size() > 0 && data.uid.size() < 100 &&
+             data.email is string && isValidEmail(data.email) &&
+             data.name is string && data.name.size() > 0 && data.name.size() < 100 &&
+             isValidDateString(data.createdAt);
+    }
+
+    function isValidAthlete(data) {
+      return data.keys().hasAll(['coachId', 'name', 'accessCode', 'createdAt', 'userData']) &&
+             data.coachId is string && data.coachId.size() > 0 && data.coachId.size() < 100 &&
+             data.name is string && data.name.size() > 0 && data.name.size() < 100 &&
+             data.accessCode is string && data.accessCode.size() > 0 && data.accessCode.size() < 20 &&
+             isValidDateString(data.createdAt) &&
+             data.userData is string && data.userData.size() < 1000000 && // 1MB limit for JSON string
+             (!('athleteUid' in data) || data.athleteUid == null || (data.athleteUid is string && data.athleteUid.size() > 0 && data.athleteUid.size() < 100));
+    }
+
+    function isValidExercise(data) {
+      return data.keys().hasAll(['id', 'name', 'category', 'type', 'coachId']) &&
+             data.id is string && data.id.size() > 0 && data.id.size() < 100 &&
+             data.name is string && data.name.size() > 0 && data.name.size() < 100 &&
+             data.category in ['Upper Push', 'Upper Pull', 'Lower Body'] &&
+             data.type in ['FIXO', 'VARIAVEL'] &&
+             data.coachId is string && data.coachId.size() > 0 && data.coachId.size() < 100 &&
+             (!('videoUrl' in data) || data.videoUrl is string) &&
+             (!('groupId' in data) || data.groupId is string) &&
+             (!('subExercises' in data) || data.subExercises is list);
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /coaches/{coachId} {
+      allow get: if isOwner(coachId);
+      allow list: if isOwner(coachId);
+      allow create: if isOwner(coachId) && isValidCoach(request.resource.data) && request.resource.data.uid == coachId;
+      allow update: if isOwner(coachId) && isValidCoach(request.resource.data) && request.resource.data.uid == coachId && request.resource.data.createdAt == resource.data.createdAt;
+      allow delete: if isOwner(coachId);
+
+      match /exercises/{exerciseId} {
+        allow read: if true;
+        allow write: if isOwner(coachId) && isValidExercise(request.resource.data) && request.resource.data.coachId == coachId;
+      }
+      match /exerciseGroups/{groupId} {
+        allow read: if true;
+        allow write: if isOwner(coachId);
+      }
+    }
+
+    match /athletes/{athleteId} {
+      // Coach can list their athletes, athlete can list themselves
+      allow list: if isAuthenticated() && (resource.data.coachId == request.auth.uid || resource.data.athleteUid == request.auth.uid);
+      
+      // Anyone with the access code can get the document
+      allow get: if true;
+      
+      // Only coach can create an athlete, and athleteUid must be null initially
+      allow create: if isAuthenticated() && request.auth.uid == request.resource.data.coachId && isValidAthlete(request.resource.data) && (!('athleteUid' in request.resource.data) || request.resource.data.athleteUid == null) && request.resource.data.accessCode == athleteId;
+      
+      // Update logic
+      allow update: if isValidAthlete(request.resource.data) && (
+        // Case 1: Coach updating the athlete
+        (isAuthenticated() && request.auth.uid == resource.data.coachId && 
+         request.resource.data.coachId == resource.data.coachId &&
+         request.resource.data.accessCode == resource.data.accessCode &&
+         request.resource.data.createdAt == resource.data.createdAt &&
+         (request.resource.data.athleteUid == resource.data.athleteUid || request.resource.data.athleteUid == null)) 
+        || 
+        // Case 2: Athlete claiming the profile (if auth is enabled)
+        (isAuthenticated() && resource.data.athleteUid == null && 
+         request.resource.data.athleteUid == request.auth.uid && 
+         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['athleteUid']))
+        ||
+        // Case 3: Athlete updating their own data (authenticated or unauthenticated)
+        // We allow this if ONLY userData is changed.
+        (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['userData']))
+      );
+
+      // Only coach can delete
+      allow delete: if isAuthenticated() && request.auth.uid == resource.data.coachId;
+    }
+  }
+}

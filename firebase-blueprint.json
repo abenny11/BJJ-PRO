@@ -1,0 +1,61 @@
+{
+  "entities": {
+    "Coach": {
+      "title": "Coach",
+      "description": "A trainer who manages multiple athletes.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "Firebase Auth UID" },
+        "email": { "type": "string", "format": "email" },
+        "name": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "name", "createdAt"]
+    },
+    "Athlete": {
+      "title": "Athlete",
+      "description": "An athlete managed by a coach, containing their performance data.",
+      "type": "object",
+      "properties": {
+        "coachId": { "type": "string", "description": "UID of the coach managing this athlete" },
+        "athleteUid": { "type": "string", "description": "Anonymous UID of the athlete once they claim this profile. Null initially." },
+        "name": { "type": "string" },
+        "accessCode": { "type": "string", "description": "The unique code used to access this profile (also the document ID)" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "userData": {
+          "type": "object",
+          "description": "The athlete's performance and cycle data (JSON serialized or nested object)"
+        }
+      },
+      "required": ["coachId", "name", "accessCode", "createdAt", "userData"]
+    },
+    "Exercise": {
+      "title": "Exercise",
+      "description": "A custom exercise defined by a coach.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "category": { "type": "string", "enum": ["Upper Push", "Upper Pull", "Lower Body"] },
+        "type": { "type": "string", "enum": ["FIXO", "VARIAVEL"] },
+        "videoUrl": { "type": "string" },
+        "coachId": { "type": "string" }
+      },
+      "required": ["id", "name", "category", "type", "coachId"]
+    }
+  },
+  "firestore": {
+    "coaches/{coachId}": {
+      "schema": { "$ref": "#/entities/Coach" },
+      "description": "Stores coach profiles."
+    },
+    "coaches/{coachId}/exercises/{exerciseId}": {
+      "schema": { "$ref": "#/entities/Exercise" },
+      "description": "Stores custom exercises for a coach."
+    },
+    "athletes/{athleteId}": {
+      "schema": { "$ref": "#/entities/Athlete" },
+      "description": "Stores athlete profiles and their performance data. The document ID is the accessCode."
+    }
+  }
+}
