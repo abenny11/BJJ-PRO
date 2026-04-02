@@ -1,9 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { db } from '../lib/firebase';
-import { collection, query, getDocs, setDoc, doc, deleteDoc } from 'firebase/firestore';
+import { supabase } from '../lib/supabase';
 import { Plus, Trash2, Edit2, Save, X, Dumbbell, ExternalLink } from 'lucide-react';
 import { DEFAULT_EXERCISES, Exercise } from '../lib/exercises';
-import { handleFirestoreError, OperationType } from '../lib/firestoreError';
+import { handleSupabaseError, OperationType } from '../lib/supabaseError';
 
 export function ExerciseManagement({ coachId }: { coachId: string }) {
   const [exercises, setExercises] = useState<Exercise[]>([]);
@@ -18,51 +17,57 @@ export function ExerciseManagement({ coachId }: { coachId: string }) {
 
   const fetchExercises = async () => {
     try {
-      const q = query(collection(db, 'coaches', coachId, 'exercises'));
-      const querySnapshot = await getDocs(q);
-      const customExercises = querySnapshot.docs.map(doc => doc.data() as Exercise);
-      
-      // Merge default with custom (custom overrides default if same ID)
-      const merged = [...DEFAULT_EXERCISES];
-      customExercises.forEach(custom => {
-        const index = merged.findIndex(e => e.id === custom.id);
-        if (index !== -1) {
-          merged[index] = custom;
-        } else {
-          merged.push(custom);
-        }
-      });
-      
-      setExercises(merged);
-    } catch (error) {
-      handleFirestoreError(error, OperationType.LIST, `coaches/${coachId}/exercises`);
-      setExercises(DEFAULT_EXERCISES);
+      const { data, error } = await supabase
+        .from('exercises')
+        .select('*')
+        .eq('coach_id', coachId);
+      if (error) {
+        handleSupabaseError(error, OperationType.LIST, `exercises?coach_id=${coachId}`);
+        setExercises(DEFAULT_EXERCISES);
+      } else {
+        const customExercises = (data || []) as Exercise[];
+        // Merge default with custom (custom overrides default if same ID)
+        const merged = [...DEFAULT_EXERCISES];
+        customExercises.forEach(custom => {
+          const index = merged.findIndex(e => e.id === custom.id);
+          if (index !== -1) {
+            merged[index] = custom;
+          } else {
+            merged.push(custom);
+          }
+        });
+        setExercises(merged);
+      }
     } finally {
       setLoading(false);
     }
   };
 
   const handleSave = async (exercise: Exercise) => {
-    try {
-      await setDoc(doc(db, 'coaches', coachId, 'exercises', exercise.id), {
-        ...exercise,
-        coachId
-      });
+    const { error } = await supabase.from('exercises').upsert({
+      ...exercise,
+      coach_id: coachId
+    });
+    if (error) {
+      handleSupabaseError(error, OperationType.WRITE, `exercises/${exercise.id}`);
+    } else {
       setEditingId(null);
       setIsAdding(false);
       fetchExercises();
-    } catch (error) {
-      handleFirestoreError(error, OperationType.WRITE, `coaches/${coachId}/exercises/${exercise.id}`);
     }
   };
 
   const handleDelete = async (id: string) => {
     if (!window.confirm('Tem certeza que deseja remover este exercício?')) return;
-    try {
-      await deleteDoc(doc(db, 'coaches', coachId, 'exercises', id));
+    const { error } = await supabase
+      .from('exercises')
+      .delete()
+      .eq('id', id)
+      .eq('coach_id', coachId);
+    if (error) {
+      handleSupabaseError(error, OperationType.DELETE, `exercises/${id}`);
+    } else {
       fetchExercises();
-    } catch (error) {
-      handleFirestoreError(error, OperationType.DELETE, `coaches/${coachId}/exercises/${id}`);
     }
   };
 

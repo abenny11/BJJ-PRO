@@ -1,9 +1,8 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
-import { db } from '../lib/firebase';
-import { collection, query, getDocs, onSnapshot, doc, getDoc } from 'firebase/firestore';
+import { supabase } from '../lib/supabase';
 import { DEFAULT_EXERCISES, Exercise } from '../lib/exercises';
 import { useAuth } from './AuthContext';
-import { handleFirestoreError, OperationType } from '../lib/firestoreError';
+import { handleSupabaseError, OperationType } from '../lib/supabaseError';
 
 interface ExerciseContextType {
   exercises: Exercise[];
@@ -21,48 +20,64 @@ export const ExerciseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    let unsubscribe: () => void = () => {};
+    let channel: ReturnType<typeof supabase.channel> | null = null;
+
+    const fetchExercises = async (coachId: string) => {
+      const { data, error } = await supabase
+        .from('exercises')
+        .select('*')
+        .eq('coach_id', coachId);
+
+      if (error) {
+        handleSupabaseError(error, OperationType.LIST, `exercises?coach_id=${coachId}`);
+        setExercises(DEFAULT_EXERCISES);
+      } else {
+        const customExercises = (data || []) as Exercise[];
+        const merged = [...DEFAULT_EXERCISES];
+        customExercises.forEach(custom => {
+          const index = merged.findIndex(e => e.id === custom.id);
+          if (index !== -1) {
+            merged[index] = custom;
+          } else {
+            merged.push(custom);
+          }
+        });
+        setExercises(merged);
+      }
+      setLoading(false);
+    };
 
     const startFetching = async () => {
       let coachId: string | null = null;
 
       if (role === 'coach' && user) {
-        coachId = user.uid;
+        coachId = user.id;
       } else if (role === 'athlete' && athleteId) {
-        // Fetch athlete doc to get coachId
-        try {
-          const athleteRef = doc(db, 'athletes', athleteId);
-          const athleteSnap = await getDoc(athleteRef);
-          if (athleteSnap.exists()) {
-            coachId = athleteSnap.data().coachId;
-          }
-        } catch (error) {
-          handleFirestoreError(error, OperationType.GET, `athletes/${athleteId}`);
+        const { data, error } = await supabase
+          .from('athletes')
+          .select('coach_id')
+          .eq('access_code', athleteId)
+          .single();
+
+        if (error) {
+          handleSupabaseError(error, OperationType.GET, `athletes?access_code=${athleteId}`);
+        } else {
+          coachId = data?.coach_id || null;
         }
       }
 
       if (coachId) {
-        const q = query(collection(db, 'coaches', coachId, 'exercises'));
-        unsubscribe = onSnapshot(q, (snapshot) => {
-          const customExercises = snapshot.docs.map(doc => doc.data() as Exercise);
-          
-          const merged = [...DEFAULT_EXERCISES];
-          customExercises.forEach(custom => {
-            const index = merged.findIndex(e => e.id === custom.id);
-            if (index !== -1) {
-              merged[index] = custom;
-            } else {
-              merged.push(custom);
-            }
-          });
-          
-          setExercises(merged);
-          setLoading(false);
-        }, (error) => {
-          handleFirestoreError(error, OperationType.LIST, `coaches/${coachId}/exercises`);
-          setExercises(DEFAULT_EXERCISES);
-          setLoading(false);
-        });
+        await fetchExercises(coachId);
+
+        // Subscribe to real-time updates via Supabase Realtime
+        channel = supabase
+          .channel(`exercises:coach_id=eq.${coachId}`)
+          .on(
+            'postgres_changes',
+            { event: '*', schema: 'public', table: 'exercises', filter: `coach_id=eq.${coachId}` },
+            () => { fetchExercises(coachId!); }
+          )
+          .subscribe();
       } else {
         setExercises(DEFAULT_EXERCISES);
         setLoading(false);
@@ -71,7 +86,11 @@ export const ExerciseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
     startFetching();
 
-    return () => unsubscribe();
+    return () => {
+      if (channel) {
+        supabase.removeChannel(channel);
+      }
+    };
   }, [user, role, athleteId]);
 
   return (

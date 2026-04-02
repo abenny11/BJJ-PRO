@@ -8,13 +8,13 @@ This contains everything you need to run your app locally.
 
 View your app in AI Studio: https://ai.studio/apps/f35b3bad-e7ba-4056-aa72-05cd1d2c13cd
 
-## Run Locally
+## Configuração
 
-**Prerequisites:**  Node.js
-
-
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+1. Instale as dependências: `npm install`
+2. Configure as variáveis de ambiente no `.env.local`:
+   - `GEMINI_API_KEY`: sua chave da API Gemini
+   - `VITE_SUPABASE_URL`: URL do seu projeto Supabase
+   - `VITE_SUPABASE_ANON_KEY`: chave anon pública do Supabase
+3. Execute o schema SQL em `supabase-schema.sql` no SQL Editor do seu projeto Supabase
+4. Ative o provider Google em Authentication > Providers no Supabase Dashboard
+5. Rode o app: `npm run dev`

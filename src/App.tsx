@@ -61,9 +61,8 @@ import { ExerciseProvider, useExercises } from './contexts/ExerciseContext';
 import { LoginScreen } from './components/LoginScreen';
 import { CoachDashboard } from './components/CoachDashboard';
 import { Exercise } from './lib/exercises';
-import { doc, getDoc, updateDoc, onSnapshot } from 'firebase/firestore';
-import { db } from './lib/firebase';
-import { handleFirestoreError, OperationType } from './lib/firestoreError';
+import { supabase } from './lib/supabase';
+import { handleSupabaseError, OperationType } from './lib/supabaseError';
 
 export const INITIAL_STATE: UserData = {
   name: '',
@@ -187,13 +186,33 @@ export function AthleteView({ athleteId, isCoach, onBack }: { athleteId: string,
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const docRef = doc(db, 'athletes', athleteId);
-    const unsubscribe = onSnapshot(docRef, (docSnap) => {
-      if (docSnap.exists()) {
-        const data = docSnap.data();
-        if (data.userData) {
+    let channel: ReturnType<typeof supabase.channel> | null = null;
+
+    const fetchAthleteData = async () => {
+      const { data, error } = await supabase
+        .from('athletes')
+        .select('user_data')
+        .eq('access_code', athleteId)
+        .single();
+
+      if (error) {
+        handleSupabaseError(error, OperationType.GET, `athletes?access_code=${athleteId}`);
+        setLoading(false);
+        return;
+      }
+
+      if (data) {
+        const rawUserData = data.user_data;
+        if (rawUserData && typeof rawUserData === 'object' && Object.keys(rawUserData).length > 0) {
+          setUserData({
+            ...rawUserData as UserData,
+            bodyCompHistory: (rawUserData as any).bodyCompHistory || []
+          });
+        } else if (rawUserData && typeof rawUserData === 'string') {
+          // Compatibility fallback: handle data that may have been stored as a JSON string
+          // before the migration to native JSONB. New data will always be a plain object.
           try {
-            const parsed = JSON.parse(data.userData);
+            const parsed = JSON.parse(rawUserData);
             setUserData({
               ...parsed,
               bodyCompHistory: parsed.bodyCompHistory || []
@@ -209,22 +228,40 @@ export function AthleteView({ athleteId, isCoach, onBack }: { athleteId: string,
         setUserData(INITIAL_STATE);
       }
       setLoading(false);
-    }, (error) => {
-      handleFirestoreError(error, OperationType.GET, `athletes/${athleteId}`);
-      setLoading(false);
-    });
+    };
 
-    return () => unsubscribe();
+    fetchAthleteData();
+
+    // Subscribe to real-time changes for this athlete
+    channel = supabase
+      .channel(`athletes:access_code=eq.${athleteId}`)
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'athletes', filter: `access_code=eq.${athleteId}` },
+        () => { fetchAthleteData(); }
+      )
+      .subscribe();
+
+    return () => {
+      if (channel) {
+        supabase.removeChannel(channel);
+      }
+    };
   }, [athleteId]);
 
   useEffect(() => {
     if (!userData) return;
     const saveUserData = async () => {
       try {
-        const docRef = doc(db, 'athletes', athleteId);
-        await updateDoc(docRef, { userData: JSON.stringify(userData) });
+        const { error } = await supabase
+          .from('athletes')
+          .update({ user_data: userData })
+          .eq('access_code', athleteId);
+        if (error) {
+          handleSupabaseError(error, OperationType.UPDATE, `athletes?access_code=${athleteId}`);
+        }
       } catch (error) {
-        handleFirestoreError(error, OperationType.UPDATE, `athletes/${athleteId}`);
+        handleSupabaseError(error, OperationType.UPDATE, `athletes?access_code=${athleteId}`);
       }
     };
     const timeoutId = setTimeout(saveUserData, 1000);

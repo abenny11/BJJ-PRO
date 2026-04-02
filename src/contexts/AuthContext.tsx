@@ -1,8 +1,6 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
-import { auth, db } from '../lib/firebase';
-import { onAuthStateChanged, signInWithPopup, GoogleAuthProvider, signInAnonymously, signOut } from 'firebase/auth';
-import { doc, getDoc, setDoc, updateDoc } from 'firebase/firestore';
-import { handleFirestoreError, OperationType } from '../lib/firestoreError';
+import { supabase } from '../lib/supabase';
+import { handleSupabaseError, OperationType } from '../lib/supabaseError';
 
 type Role = 'coach' | 'athlete' | null;
 
@@ -25,44 +23,33 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
-      if (currentUser) {
-        setUser(currentUser);
-        // Determine role
-        if (!currentUser.isAnonymous) {
-          // Coach
-          setRole('coach');
-          // Ensure coach doc exists
-          const coachRef = doc(db, 'coaches', currentUser.uid);
-          try {
-            const coachSnap = await getDoc(coachRef);
-            if (!coachSnap.exists()) {
-              await setDoc(coachRef, {
-                uid: currentUser.uid,
-                email: currentUser.email,
-                name: currentUser.displayName || 'Coach',
-                createdAt: new Date().toISOString()
-              });
-            }
-          } catch (error) {
-            handleFirestoreError(error, OperationType.GET, `coaches/${currentUser.uid}`);
-          }
-        } else {
-          // Athlete (anonymous)
-          const storedAthleteId = localStorage.getItem('athleteId');
-          if (storedAthleteId) {
-            setRole('athlete');
-            setAthleteId(storedAthleteId);
-          }
-        }
+    // Restore athlete session from localStorage on mount
+    const storedAthleteId = localStorage.getItem('athleteId');
+    if (storedAthleteId) {
+      setRole('athlete');
+      setAthleteId(storedAthleteId);
+    }
+
+    // Check existing Supabase session
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (session?.user) {
+        setUser(session.user);
+        setRole('coach');
+        ensureCoachProfile(session.user);
+      }
+      setLoading(false);
+    });
+
+    // Listen for auth state changes
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
+      if (session?.user) {
+        setUser(session.user);
+        setRole('coach');
+        await ensureCoachProfile(session.user);
       } else {
         setUser(null);
-        // Check if we have a stored athlete session even without Firebase Auth
-        const storedAthleteId = localStorage.getItem('athleteId');
-        if (storedAthleteId) {
-          setRole('athlete');
-          setAthleteId(storedAthleteId);
-        } else {
+        const stored = localStorage.getItem('athleteId');
+        if (!stored) {
           setRole(null);
           setAthleteId(null);
         }
@@ -70,12 +57,27 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setLoading(false);
     });
 
-    return () => unsubscribe();
+    return () => subscription.unsubscribe();
   }, []);
 
+  const ensureCoachProfile = async (supabaseUser: any) => {
+    try {
+      const { error } = await supabase.from('coaches').upsert({
+        uid: supabaseUser.id,
+        email: supabaseUser.email,
+        name: supabaseUser.user_metadata?.full_name || supabaseUser.user_metadata?.name || 'Coach',
+      }, { onConflict: 'uid' });
+      if (error) {
+        handleSupabaseError(error, OperationType.CREATE, `coaches/${supabaseUser.id}`);
+      }
+    } catch (error) {
+      console.error('Error upserting coach profile:', error);
+    }
+  };
+
   const loginAsCoach = async () => {
-    const provider = new GoogleAuthProvider();
-    await signInWithPopup(auth, provider);
+    const { error } = await supabase.auth.signInWithOAuth({ provider: 'google' });
+    if (error) throw error;
   };
 
   const loginAsAthlete = async (accessCode: string) => {
@@ -83,55 +85,19 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (!code) throw new Error('Por favor, insira o código de acesso.');
 
     try {
-      // Try to sign in anonymously, but don't block if it's restricted
-      let uid: string | null = null;
-      try {
-        const userCredential = await signInAnonymously(auth);
-        uid = userCredential.user.uid;
-      } catch (authError: any) {
-        console.warn('Anonymous auth restricted, proceeding without auth:', authError.message);
-        // If it's specifically the restricted operation error, we continue
-        if (authError.code !== 'auth/admin-restricted-operation') {
-          throw authError;
-        }
-      }
+      const { data, error } = await supabase
+        .from('athletes')
+        .select('access_code, athlete_uid')
+        .eq('access_code', code)
+        .single();
 
-      // Try to get the athlete doc
-      const athleteRef = doc(db, 'athletes', code);
-      let athleteSnap;
-      try {
-        athleteSnap = await getDoc(athleteRef);
-      } catch (error) {
-        handleFirestoreError(error, OperationType.GET, `athletes/${code}`);
-        return;
-      }
-
-      if (athleteSnap.exists()) {
-        const data = athleteSnap.data();
-        
-        // Only try to link UID if we have one
-        if (uid) {
-          if (!data.athleteUid) {
-            // Claim the profile
-            try {
-              await updateDoc(athleteRef, { athleteUid: uid });
-            } catch (error) {
-              handleFirestoreError(error, OperationType.UPDATE, `athletes/${code}`);
-            }
-          } else if (data.athleteUid !== uid) {
-            throw new Error('Este código já está vinculado a outro dispositivo. Peça ao seu treinador para redefinir seu acesso.');
-          }
-        }
-        
-        localStorage.setItem('athleteId', code);
-        setRole('athlete');
-        setAthleteId(code);
-      } else {
-        if (auth.currentUser?.isAnonymous) {
-          await signOut(auth);
-        }
+      if (error || !data) {
         throw new Error('Código de acesso inválido. Verifique se digitou corretamente.');
       }
+
+      localStorage.setItem('athleteId', code);
+      setRole('athlete');
+      setAthleteId(code);
     } catch (error: any) {
       console.error(error);
       throw error;
@@ -139,8 +105,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   const logout = async () => {
-    await signOut(auth);
+    await supabase.auth.signOut();
     localStorage.removeItem('athleteId');
+    setUser(null);
     setRole(null);
     setAthleteId(null);
   };

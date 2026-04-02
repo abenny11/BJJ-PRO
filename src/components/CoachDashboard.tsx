@@ -1,10 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../contexts/AuthContext';
-import { db } from '../lib/firebase';
-import { collection, query, where, getDocs, setDoc, doc, deleteDoc, updateDoc } from 'firebase/firestore';
+import { supabase } from '../lib/supabase';
 import { Users, Plus, LogOut, Copy, Trash2, ChevronRight, Dumbbell, RefreshCw } from 'lucide-react';
 import { INITIAL_STATE } from '../App';
-import { handleFirestoreError, OperationType } from '../lib/firestoreError';
+import { handleSupabaseError, OperationType } from '../lib/supabaseError';
 import { ExerciseManagement } from './ExerciseManagement';
 
 export function CoachDashboard({ onSelectAthlete }: { onSelectAthlete: (id: string) => void }) {
@@ -22,12 +21,15 @@ export function CoachDashboard({ onSelectAthlete }: { onSelectAthlete: (id: stri
   const fetchAthletes = async () => {
     if (!user) return;
     try {
-      const q = query(collection(db, 'athletes'), where('coachId', '==', user.uid));
-      const querySnapshot = await getDocs(q);
-      const data = querySnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      setAthletes(data);
-    } catch (error) {
-      handleFirestoreError(error, OperationType.LIST, 'athletes');
+      const { data, error } = await supabase
+        .from('athletes')
+        .select('*')
+        .eq('coach_id', user.id);
+      if (error) {
+        handleSupabaseError(error, OperationType.LIST, 'athletes');
+      } else {
+        setAthletes(data || []);
+      }
     } finally {
       setLoading(false);
     }
@@ -45,22 +47,23 @@ export function CoachDashboard({ onSelectAthlete }: { onSelectAthlete: (id: stri
     const accessCode = generateAccessCode();
     try {
       const newAthlete = {
-        coachId: user.uid,
+        coach_id: user.id,
         name: newAthleteName.trim(),
-        accessCode,
-        createdAt: new Date().toISOString(),
-        athleteUid: null,
-        userData: JSON.stringify({
+        access_code: accessCode,
+        athlete_uid: null,
+        user_data: {
           ...INITIAL_STATE,
           name: newAthleteName.trim()
-        })
+        }
       };
 
-      await setDoc(doc(db, 'athletes', accessCode), newAthlete);
-      setNewAthleteName('');
-      fetchAthletes();
-    } catch (error) {
-      handleFirestoreError(error, OperationType.CREATE, `athletes/${accessCode}`);
+      const { error } = await supabase.from('athletes').insert(newAthlete);
+      if (error) {
+        handleSupabaseError(error, OperationType.CREATE, `athletes/${accessCode}`);
+      } else {
+        setNewAthleteName('');
+        fetchAthletes();
+      }
     } finally {
       setIsAdding(false);
     }
@@ -68,22 +71,28 @@ export function CoachDashboard({ onSelectAthlete }: { onSelectAthlete: (id: stri
 
   const handleResetAccess = async (athlete: any) => {
     if (!window.confirm(`Deseja redefinir o acesso de ${athlete.name}? Isso permitirá que ele vincule um novo dispositivo.`)) return;
-    try {
-      await updateDoc(doc(db, 'athletes', athlete.id), { athleteUid: null });
+    const { error } = await supabase
+      .from('athletes')
+      .update({ athlete_uid: null })
+      .eq('access_code', athlete.access_code);
+    if (error) {
+      handleSupabaseError(error, OperationType.UPDATE, `athletes/${athlete.access_code}`);
+    } else {
       fetchAthletes();
       alert('Acesso redefinido com sucesso!');
-    } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, `athletes/${athlete.id}`);
     }
   };
 
   const handleDeleteAthlete = async (accessCode: string) => {
     if (!window.confirm('Tem certeza que deseja remover este atleta? Esta ação não pode ser desfeita.')) return;
-    try {
-      await deleteDoc(doc(db, 'athletes', accessCode));
+    const { error } = await supabase
+      .from('athletes')
+      .delete()
+      .eq('access_code', accessCode);
+    if (error) {
+      handleSupabaseError(error, OperationType.DELETE, `athletes/${accessCode}`);
+    } else {
       fetchAthletes();
-    } catch (error) {
-      handleFirestoreError(error, OperationType.DELETE, `athletes/${accessCode}`);
     }
   };
 
@@ -98,7 +107,7 @@ export function CoachDashboard({ onSelectAthlete }: { onSelectAthlete: (id: stri
         <header className="flex flex-col md:flex-row items-start md:items-center justify-between mb-8 gap-4">
           <div>
             <h1 className="text-3xl font-black text-red-700 tracking-tighter uppercase italic">Painel do Treinador</h1>
-            <p className="text-slate-500 font-medium">Olá, {user?.displayName}</p>
+            <p className="text-slate-500 font-medium">Olá, {user?.user_metadata?.full_name || user?.user_metadata?.name || user?.email}</p>
           </div>
           <div className="flex items-center gap-2">
             <div className="flex bg-white p-1 rounded-xl border border-slate-200 mr-4">
@@ -182,17 +191,17 @@ export function CoachDashboard({ onSelectAthlete }: { onSelectAthlete: (id: stri
                           <h3 className="font-bold text-slate-800">{athlete.name}</h3>
                           <div className="flex items-center gap-2 mt-1">
                             <span className="text-xs font-mono bg-slate-100 text-slate-600 px-2 py-1 rounded border border-slate-200">
-                              Código: {athlete.accessCode}
+                              Código: {athlete.access_code}
                             </span>
                             <button 
-                              onClick={() => copyToClipboard(athlete.accessCode)}
+                              onClick={() => copyToClipboard(athlete.access_code)}
                               className="text-slate-400 hover:text-red-600 transition-colors"
                               title="Copiar Código"
                             >
                               <Copy size={14} />
                             </button>
                           </div>
-                          {athlete.athleteUid ? (
+                          {athlete.athlete_uid ? (
                             <div className="flex items-center gap-2 mt-2">
                               <span className="text-[10px] uppercase tracking-wider font-bold text-green-600 block">Ativo (Vinculado)</span>
                               <button 
@@ -211,14 +220,14 @@ export function CoachDashboard({ onSelectAthlete }: { onSelectAthlete: (id: stri
                         
                         <div className="flex items-center gap-2 w-full sm:w-auto">
                           <button
-                            onClick={() => onSelectAthlete(athlete.id)}
+                            onClick={() => onSelectAthlete(athlete.access_code)}
                             className="flex-1 sm:flex-none flex items-center justify-center gap-1 px-4 py-2 bg-red-50 text-red-700 font-bold text-sm rounded-lg hover:bg-red-100 transition-colors"
                           >
                             Ver Treino
                             <ChevronRight size={16} />
                           </button>
                           <button
-                            onClick={() => handleDeleteAthlete(athlete.id)}
+                            onClick={() => handleDeleteAthlete(athlete.access_code)}
                             className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
                             title="Remover Atleta"
                           >
@@ -234,7 +243,7 @@ export function CoachDashboard({ onSelectAthlete }: { onSelectAthlete: (id: stri
           </div>
         ) : (
           <div className="animate-in fade-in duration-500">
-            <ExerciseManagement coachId={user?.uid || ''} />
+            <ExerciseManagement coachId={user?.id || ''} />
           </div>
         )}
       </div>
