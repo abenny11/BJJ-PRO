@@ -9,6 +9,8 @@ export default defineConfig(({mode}) => {
     plugins: [react(), tailwindcss()],
     define: {
       'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY),
+      // VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY are automatically exposed
+      // by Vite via import.meta.env.VITE_* because they have the VITE_ prefix.
     },
     resolve: {
       alias: {
