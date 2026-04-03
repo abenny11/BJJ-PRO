@@ -184,6 +184,7 @@ export function AthleteView({ athleteId, isCoach, onBack }: { athleteId: string,
   const [activeTab, setActiveTab] = useState<'profile' | 'evaluations' | 'training' | 'nutrition' | 'dashboard' | 'history'>('dashboard');
   const [userData, setUserData] = useState<UserData | null>(null);
   const [loading, setLoading] = useState(true);
+  const pendingSaveRef = React.useRef(false);
 
   useEffect(() => {
     let channel: ReturnType<typeof supabase.channel> | null = null;
@@ -238,7 +239,7 @@ export function AthleteView({ athleteId, isCoach, onBack }: { athleteId: string,
       .on(
         'postgres_changes',
         { event: 'UPDATE', schema: 'public', table: 'athletes', filter: `access_code=eq.${athleteId}` },
-        () => { fetchAthleteData(); }
+        () => { if (!pendingSaveRef.current) fetchAthleteData(); }
       )
       .subscribe();
 
@@ -252,6 +253,7 @@ export function AthleteView({ athleteId, isCoach, onBack }: { athleteId: string,
   useEffect(() => {
     if (!userData) return;
     const saveUserData = async () => {
+      pendingSaveRef.current = true;
       try {
         const { error } = await supabase
           .from('athletes')
@@ -262,14 +264,20 @@ export function AthleteView({ athleteId, isCoach, onBack }: { athleteId: string,
         }
       } catch (error) {
         handleSupabaseError(error, OperationType.UPDATE, `athletes?access_code=${athleteId}`);
+      } finally {
+        pendingSaveRef.current = false;
       }
     };
     const timeoutId = setTimeout(saveUserData, 1000);
     return () => clearTimeout(timeoutId);
   }, [userData, athleteId]);
 
-  const updateUserData = (updates: Partial<UserData>) => {
-    setUserData(prev => prev ? { ...prev, ...updates } : prev);
+  const updateUserData = (updates: Partial<UserData> | ((prev: UserData) => Partial<UserData>)) => {
+    setUserData(prev => {
+      if (!prev) return prev;
+      const resolved = typeof updates === 'function' ? updates(prev) : updates;
+      return { ...prev, ...resolved };
+    });
   };
 
   const updateCurrentCycle = (updates: Partial<Cycle>) => {
@@ -473,7 +481,7 @@ function NavItem({ active, onClick, icon, label }: { active: boolean, onClick: (
   );
 }
 
-function ProfileSection({ userData, updateUserData, updateCurrentCycle, bodyComp }: { userData: UserData, updateUserData: (u: Partial<UserData>) => void, updateCurrentCycle: (c: Partial<Cycle>) => void, bodyComp: any }) {
+function ProfileSection({ userData, updateUserData, updateCurrentCycle, bodyComp }: { userData: UserData, updateUserData: (u: Partial<UserData> | ((prev: UserData) => Partial<UserData>)) => void, updateCurrentCycle: (c: Partial<Cycle>) => void, bodyComp: any }) {
   const [isSaved, setIsSaved] = useState(false);
   const [activeSubTab, setActiveSubTab] = useState<'profile' | 'schedule'>('profile');
   const [editingRecordIndex, setEditingRecordIndex] = useState<number | null>(null);
@@ -497,9 +505,11 @@ function ProfileSection({ userData, updateUserData, updateCurrentCycle, bodyComp
 
   const handleDeleteRecord = (index: number) => {
     if (!confirm('Tem certeza que deseja excluir este registro?')) return;
-    const newHistory = [...(userData.bodyCompHistory || [])];
-    newHistory.splice(index, 1);
-    updateUserData({ bodyCompHistory: newHistory });
+    updateUserData(prev => {
+      const newHistory = [...(prev.bodyCompHistory || [])];
+      newHistory.splice(index, 1);
+      return { bodyCompHistory: newHistory };
+    });
   };
 
   const handleStartEdit = (index: number, record: BodyCompRecord) => {
@@ -510,19 +520,36 @@ function ProfileSection({ userData, updateUserData, updateCurrentCycle, bodyComp
 
   const handleSaveEdit = () => {
     if (editingRecordIndex === null || !editMetrics) return;
-    
-    const newHistory = [...(userData.bodyCompHistory || [])];
-    const updatedComp = calculateBodyFat(editMetrics, userData.gender);
-    
-    newHistory[editingRecordIndex] = {
-      date: editDate,
-      metrics: editMetrics,
-      composition: updatedComp
-    };
-    
-    updateUserData({ bodyCompHistory: newHistory });
+
+    const capturedIndex = editingRecordIndex;
+    const capturedMetrics = { ...editMetrics };
+    const capturedDate = editDate;
+
+    // Validate the index is still valid before updating
+    const currentHistory = userData.bodyCompHistory || [];
+    if (capturedIndex < 0 || capturedIndex >= currentHistory.length) {
+      alert('Este registro não existe mais. Recarregue a página e tente novamente.');
+      setEditingRecordIndex(null);
+      setEditMetrics(null);
+      setEditDate('');
+      return;
+    }
+
+    updateUserData(prev => {
+      const newHistory = [...(prev.bodyCompHistory || [])];
+      if (capturedIndex < 0 || capturedIndex >= newHistory.length) return {};
+      const updatedComp = calculateBodyFat(capturedMetrics, prev.gender);
+      newHistory[capturedIndex] = {
+        date: capturedDate,
+        metrics: capturedMetrics,
+        composition: updatedComp
+      };
+      return { bodyCompHistory: newHistory };
+    });
+
     setEditingRecordIndex(null);
     setEditMetrics(null);
+    setEditDate('');
   };
 
   return (
